@@ -66,4 +66,3 @@ if [[ ! $(compgen -G "/tmp/*.${USER}.sshagent") ]]; then
     eval ${output}; ssh-add ~/.ssh/id_ed25519
     echo ${output} > /tmp/${sshagentpid}.${USER}.sshagent
 fi
-
