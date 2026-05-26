@@ -1,0 +1,23 @@
+#!/bin/bash
+# .bastion_profiles/iot-edge-01.sh.example
+# Architecture: Reverse-Shell Beacon
+# Description: Demonstrates connecting to an edge device that cannot be reached directly
+# but instead dials home (reverse SSH tunnel) to a known jump server.
+
+VM_NAME="iot-edge-01"
+
+connect() {
+    echo "=> [iot-edge-01] Checking for active beacon on jump server..."
+    
+    # In this scenario, the IoT device maintains a reverse tunnel to 'jump.example.com'
+    # forwarding its port 22 to port 2222 on the jump server's localhost.
+    
+    JUMP_SERVER="jump.example.com"
+    JUMP_USER="admin"
+    
+    echo "=> [iot-edge-01] Connecting via reverse tunnel on $JUMP_SERVER:2222..."
+    
+    # We use ProxyJump to route through the jump server, and then connect to localhost:2222
+    # from the perspective of the jump server.
+    ssh -J ${JUMP_USER}@${JUMP_SERVER} -p 2222 edge-user@localhost
+}

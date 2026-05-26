@@ -1,0 +1,39 @@
+#!/bin/bash
+# ==============================================================================
+# ESCAPE HATCH PROFILE: prod-db.sh
+# Scenario: Just-In-Time (JIT) VM Access Request
+# ==============================================================================
+
+echo "--> [JIT Profile] Requesting Just-In-Time access for ${az_name}..."
+
+# Retrieve dynamic properties from config
+jit_port="${VM_PROPS[${vm}_jit_port]:-22}"
+VMID=$(get_vmid "${rg}" "${az_name}")
+
+# 1. Request JIT Access
+az security jit-policy access-request \
+    --name "default" \
+    --resource-group "${rg}" \
+    --location "${location}" \
+    --vm "${VMID}" \
+    --port "${jit_port}" \
+    --hours 1 > /dev/null
+
+echo "--> [JIT Profile] Waiting 30 seconds for Azure Network Security Groups to update..."
+sleep 30
+
+# 2. Proceed with standard connection (mimicking the flat engine)
+if [[ "$BASTION_MODE" == "ssh" ]]; then
+    echo "Mode: SSH Interactive. Establishing connection to ${az_name} via Bastion..."
+    if [[ "$VM_AUTH_TYPE" == "entra" ]]; then
+        az network bastion ssh -n "${VM_PROPS[global_default_bastion]}" -g "${rg}" --target-resource-id "${VMID}" --auth-type AAD --username "${USER}"
+    else
+        az network bastion tunnel -n "${VM_PROPS[global_default_bastion]}" -g "${rg}" --target-resource-id "${VMID}" --resource-port "${jit_port}" --port "${port}" > /dev/null 2>&1 &
+        sleep 3
+        ssh -p "${port}" -o StrictHostKeyChecking=no "${USER}@localhost"
+    fi
+else
+    echo "Mode: Background Tunnel. Establishing connection to ${az_name} on local port ${port}..."
+    echo "${port}" > "${HOME}/.bastion_fwd_ports_${vm}"
+    az network bastion tunnel -n "${VM_PROPS[global_default_bastion]}" -g "${rg}" --target-resource-id "${VMID}" --resource-port "${jit_port}" --port "${port}" > /dev/null 2>&1 &
+fi

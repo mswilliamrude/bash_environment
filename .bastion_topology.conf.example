@@ -1,0 +1,108 @@
+# ==============================================================================
+# BASTION TOPOLOGY CONFIGURATION (EXAMPLE)
+# ==============================================================================
+# Rename this file to .bastion_topology.conf (or ~/.bastion_topology.conf)
+# and populate it with your environment's sensitive data.
+# This file is explicitly ignored by Git to prevent accidental leakage of
+# internal IP addresses, subscription IDs, and infrastructure naming.
+
+# ==============================================================================
+# TOPOLOGY OVERVIEW
+# ==============================================================================
+#
+#  [Local Machine]
+#         |
+#         | (az network bastion tunnel)
+#         |
+#   [Azure Bastion]
+#         |
+#         +------------------------------------+
+#         |                                    |
+#  (Standard Dev VM)                  (Sandbox Environment)
+#  e.g., api0, redis0                 e.g., jumpbox01
+#         |                                    |
+#    [Target VM]                     [Azure Public IP]
+#                                              | (az ssh vm)
+#                                              |
+#                                       [Jumpbox VM]
+#                                              |
+#                                              +-- (Port Fwd 172.x.x.x:22)
+#                                              |     -> [Inner Target A]
+#                                              |
+#                                              +-- (Port Fwd 172.x.x.x:3389)
+#                                              |     -> [Inner Target B]
+#                                              |
+#                                     (plink subshell)
+#                                              |
+#                                      [Deep Target]
+#                                      x.x.x.a:22
+#                                              |
+#                                       (ssh proxyjump)
+#                                              |
+#                                     [Deeper Target 2]
+#                                      x.x.x.b:22
+#
+# ==============================================================================
+
+# ==============================================================================
+# BASTION_VMS (Core Virtual Machine Routing)
+# ==============================================================================
+# Format: "alias|azure_name|resource_group|subscription_name|port|type|autostart|auth_type"
+#
+# Column Breakdown:
+# 1. alias             : Short name used in CLI commands (e.g., `bastion api0`)
+# 2. azure_name        : Exact name of the virtual machine resource in Azure
+# 3. resource_group    : Azure Resource Group containing the VM
+# 4. subscription_name : Name of the Azure Subscription containing the VM
+# 5. port              : Local localhost port to bind for the Bastion/SSH tunnel (e.g., 12022)
+# 6. type              : The Routing Topology engine to use:
+#                        - 'flat'       = Standard 1:1 Bastion tunnel directly to target VM
+#                        - 'flat-entra' = Flat Bastion tunnel + 'az network bastion ssh' for AAD token
+#                        - 'tiered'     = Advanced multi-hop routing ('az ssh vm' -> proxy jumps)
+# 7. autostart         : true/false. If true, script will attempt to `az vm start` if it is stopped.
+# 8. auth_type         : Interactive Session Identity:
+#                        - 'ssh'       = Standard SSH key (relies on local MSYS2 ssh-agent/pageant)
+#                        - 'entra'     = Injects Entra ID username (requires 'flat-entra' topology)
+#                        - '<string>'  = Specific SSH username override (e.g., 'ubuntu' or 'root')
+
+BASTION_VMS=(
+    "api0|vm-api-dev-01|rg-project-dev|Sub_Dev_Environment|12022|flat|true|azureuser"
+    "redis0|vm-cache-dev-01|rg-project-dev|Sub_Dev_Environment|13022|flat|true|azureuser"
+    "jbox|vm-jumpbox-sandbox-01|rg-sandbox-net|Sub_Sandbox_Environment|10022|tiered|false|entra"
+    "secvdi|vm-secure-vdi-01|rg-secure-net|Sub_Secure_Environment|20000|flat-entra|false|entra"
+)
+
+
+# ==============================================================================
+# VM_PROPS (Dynamic Engine Properties & Overrides)
+# ==============================================================================
+# Attach arbitrary, script-specific data to any alias.
+# The routing engine dynamically queries these based on the topology type.
+#
+# Recognized Keys:
+#   <alias>_az_tunnels       : Space-separated list of "local_port:remote_ip:remote_port" injected into base SSH tunnel.
+#   <alias>_plink_tunnels    : Space-separated list of subshell tunnels injected into the background plink process.
+#   <alias>_plink_entry_port : (Optional) Overrides the default subshell entry port (default: 2022).
+#   <alias>_fwd_ports        : Space-separated list of all local ports to register for cleanup via `cleanup_tunnels`.
+#   <alias>_bastion_name     : Overrides the target Azure Bastion resource name for this specific VM.
+#   <alias>_bastion_rg       : Overrides the Resource Group where the Azure Bastion is located.
+#   global_default_bastion   : Fallback bastion name used if an alias-specific bastion is not provided.
+
+declare -A VM_PROPS
+
+# --- Properties for 'tiered' type profiles (e.g., jbox) ---
+# Tunnels hidden behind the jumpbox accessible via az ssh vm injection
+VM_PROPS["jbox_az_tunnels"]="2022:x.x.x.x:22 13389:x.x.x.x:3389"
+# Deep tunnels injected into the background subshell
+VM_PROPS["jbox_plink_tunnels"]="2023:x.x.x.a:22 2024:x.x.x.b:22"
+# Track all local ports so `cleanup_tunnels jbox` gracefully shuts them down
+VM_PROPS["jbox_fwd_ports"]="2022 13389 2023 2024"
+
+# --- Properties for specialized profiles (e.g., secvdi) ---
+# Overrides the default bastion host to use an isolated, highly secure bastion deployment
+VM_PROPS["secvdi_bastion_name"]="bst-secure-isolated-01"
+VM_PROPS["secvdi_bastion_rg"]="rg-secure-net"
+
+# --- Global defaults ---
+# Used by standard 'flat' VMs if no specific profile exists
+VM_PROPS["global_default_bastion"]="bst-default-region-01"

@@ -1,0 +1,4 @@
+.bastion_topology.conf
+.bastion_profiles/*.sh
+!.bastion_profiles/*.example
+.learnings/

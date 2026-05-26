@@ -1,0 +1,25 @@
+#!/bin/bash
+# .bastion_profiles/legacy-box.sh.example
+# Architecture: VPN + Proxy
+# Description: Demonstrates connecting to a legacy system that requires 
+# establishing a VPN connection first, and then routing SSH through a SOCKS proxy.
+
+VM_NAME="legacy-box"
+
+connect() {
+    echo "=> [legacy-box] Initializing legacy VPN connection..."
+    
+    # Example: Start a VPN client in the background (mocked)
+    # sudo openvpn --config ~/.vpn/legacy.conf --daemon
+    
+    echo "=> [legacy-box] Waiting for VPN interface to come up..."
+    sleep 5
+    
+    echo "=> [legacy-box] Starting SSH via SOCKS proxy..."
+    # Using netcat as a ProxyCommand to route through a local SOCKS proxy
+    ssh -o ProxyCommand="nc -X 5 -x 127.0.0.1:1080 %h %p" legacy-user@x.x.x.x
+    
+    # Cleanup after SSH exits
+    echo "=> [legacy-box] Disconnecting VPN..."
+    # sudo pkill openvpn
+}
