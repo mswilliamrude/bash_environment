@@ -62,11 +62,30 @@ done
 function get_vmid(){
     local rg=${1}
     local name=${2}
-    local VMID=$(az vm show \
-        -g "${rg}"                                \
-        -n "${name}"     \
+    local CACHE_FILE="${HOME}/.bastion_vmid_cache_${name}"
+    local CACHE_EXPIRY=$(( 10 * 3600 )) # 10 hours in seconds
+    local CURRENT_TIME=$(date +%s)
+    local vmid=""
+
+    # Check cache first
+    if [[ -f "$CACHE_FILE" ]]; then
+        read -r cache_time cached_vmid < "$CACHE_FILE"
+        if (( CURRENT_TIME - cache_time < CACHE_EXPIRY )) && [[ -n "$cached_vmid" ]]; then
+            echo "$cached_vmid"
+            return
+        fi
+    fi
+
+    # Cache miss or expired, fetch from Azure
+    vmid=$(az vm show \
+        -g "${rg}" \
+        -n "${name}" \
         --query id -o tsv)
-    echo "${VMID}"
+    
+    if [[ -n "$vmid" ]]; then
+        echo "${CURRENT_TIME} ${vmid}" > "$CACHE_FILE"
+        echo "${vmid}"
+    fi
 }
 
 
@@ -371,12 +390,20 @@ function bastion(){
             if [[ "$BASTION_MODE" == "ssh" ]]; then
                 echo "Mode: SSH Interactive. Establishing connection to ${az_name} via Bastion..."
                 
-                # Fast-path: If the tunnel was ALREADY running, we don't need to sleep
+                # Fast-path: Wait actively for the tunnel port to open instead of a dumb sleep
                 if [[ "$tunnel_was_running" == "true" ]]; then
-                    echo "Tunnel already stabilized. Connecting immediately..."
+                    echo "Tunnel already established. Connecting immediately..."
                 else
-                    echo "Waiting 3 seconds for new tunnel to stabilize before connecting..."
-                    sleep 3
+                    echo "Waiting for new tunnel to stabilize on port ${port}..."
+                    local attempts=0
+                    while ! netstat -an | egrep -q "(127.0.0.1|0.0.0.0):${port}.*LISTEN"; do
+                        if (( attempts > 15 )); then
+                            echo "Warning: Tunnel didn't seem to stabilize after 15 seconds. Attempting SSH anyway..."
+                            break
+                        fi
+                        sleep 1
+                        ((attempts++))
+                    done
                 fi
                 
                 # Apply dynamic forwarding args if defined
