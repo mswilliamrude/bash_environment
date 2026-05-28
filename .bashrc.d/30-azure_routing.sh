@@ -337,18 +337,18 @@ function bastion(){
     fi
 
     # Check if we need to launch a background subshell for nested routing.
-    local subshell_cmd="${BASTION_SUBSHELL_CMD:-ssh}"
+    local subshell_cmd="${BASTION_SUBSHELL_CMD:-plink}"
     local dynamic_subshell_args=()
     
     if [[ -n "${VM_PROPS[${vm}_plink_tunnels]}" ]]; then
         # Default entry port is 2022, but allow override
         local entry_port="${VM_PROPS[${vm}_plink_entry_port]:-2022}"
         
-        if [[ "${subshell_cmd}" == "plink.exe" ]]; then
-            dynamic_subshell_args=("-ssh" "${SSH_TARGET_USER}@localhost" "-P" "${entry_port}" "-N" "-batch" "-agent")
-        else
-            # Native ssh fallback for Linux/macOS
-            dynamic_subshell_args=("-p" "${entry_port}" "-N" "-o" "StrictHostKeyChecking=no" "${SSH_TARGET_USER}@localhost")
+         if [[ "${subshell_cmd}" == *plink.exe ]]; then
+             dynamic_subshell_args=("-P" "${entry_port}" "-N" "-batch" "-agent" "${SSH_TARGET_USER}@localhost")
+         else
+             # Native ssh fallback for Linux/macOS
+             dynamic_subshell_args=("-p" "${entry_port}" "-N" "-o" "StrictHostKeyChecking=no" "${SSH_TARGET_USER}@localhost")
         fi
         
         for tunnel in ${VM_PROPS[${vm}_plink_tunnels]}; do
@@ -509,7 +509,7 @@ function bastion(){
                     (
                         sleep 10
                         echo -e "\n--> [Subshell] Attempting to launch ${subshell_cmd} port forwards..."
-                        ${subshell_cmd} "${dynamic_subshell_args[@]}" > /dev/null 2>&1
+                        "${subshell_cmd}" "${dynamic_subshell_args[@]}" > /dev/null 2>&1
                     ) &
                 fi
                 
@@ -537,7 +537,7 @@ function bastion(){
                 if kill -0 $ssh_pid 2>/dev/null; then
                     # Stand up subshell in background if defined
                     if [[ ${#dynamic_subshell_args[@]} -gt 0 ]]; then
-                        ${subshell_cmd} "${dynamic_subshell_args[@]}" > /dev/null 2>&1 &
+                        "${subshell_cmd}" "${dynamic_subshell_args[@]}" > /dev/null 2>&1 &
                         echo "Tiered tunnels established successfully based on ${vm} profile."
                     else
                         echo "Tunnel established successfully."
