@@ -80,7 +80,7 @@ function get_vmid(){
     vmid=$(az vm show \
         -g "${rg}" \
         -n "${name}" \
-        --query id -o tsv)
+        --query id -o tsv </dev/null)
     
     if [[ -n "$vmid" ]]; then
         echo "${CURRENT_TIME} ${vmid}" > "$CACHE_FILE"
@@ -94,14 +94,14 @@ function az_subscription(){
     local verb=${1}; shift
     local noun="${@}"
     if [[ "${verb,,}" == "get" ]]; then
-        noun=$(az account show --query name -o tsv 2>/dev/null)
+        noun=$(az account show --query name -o tsv 2>/dev/null </dev/null)
         echo "${noun}"
     elif [[ "${verb,,}" == "set" ]]; then
         # FAST-PATH: Only switch subscriptions if we aren't already on the target one
-        local current_sub=$(az account show --query name -o tsv 2>/dev/null | tr -d '\r')
+        local current_sub=$(az account show --query name -o tsv 2>/dev/null </dev/null | tr -d '\r')
         if [[ "$current_sub" != "$noun" ]]; then
             echo "Switching Azure context to subscription: ${noun}..."
-            az account set --subscription "${noun}"
+            az account set --subscription "${noun}" </dev/null
         fi
     fi
 }
@@ -270,8 +270,10 @@ function bastion(){
     local autostart_flag="${VM_AUTOSTART[$vm]}"
     local auth_flag="${VM_AUTH[$vm]}"
     
-    # Retrieve dynamic bastion name from config, fallback to default generic name
-    local bastion_name="${VM_PROPS[${vm}_bastion_name]:-${VM_PROPS[global_default_bastion]:-bst-default-region-01}}"
+    # Retrieve dynamic bastion name from config, fallback to topology-level default.
+    # If neither per-VM nor global default is set, this placeholder will fail loudly
+    # reminding you to define VM_PROPS["global_default_bastion"] in .bastion_topology.conf.
+    local bastion_name="${VM_PROPS[${vm}_bastion_name]:-${VM_PROPS[global_default_bastion]:-UNCONFIGURED_BASTION_SEE_TOPOLOGY_CONF}}"
     local bastion_rg="${VM_PROPS[${vm}_bastion_rg]:-${rg}}"
 
     # Determine the SSH identity to use.
@@ -301,12 +303,13 @@ function bastion(){
     if [[ "${autostart_flag,,}" != "false" && "${autostart_flag,,}" != "no" ]]; then
         # FAST-PATH: If the local port is bound, or an active az ssh tunnel exists, 
         # the VM is almost certainly running. Skip the brutal Azure API query.
-        if netstat -an | egrep -q "(127.0.0.1|0.0.0.0):${port}.*LISTEN" || [[ "$(ps -ef | grep "az ssh vm" | grep "${az_name}" | wc -l)" -gt 0 ]]; then
+        netstat -an > /tmp/netstat.out 2>/dev/null
+        if egrep "(127.0.0.1|0.0.0.0):${port}.*LISTEN" /tmp/netstat.out >/dev/null || [[ "$(ps -ef | grep "az ssh vm" | grep "${az_name}" | wc -l)" -gt 0 ]]; then
             echo "${vm} tunnel detected in background. Skipping Azure power state check..."
         else
             echo "Checking to see if ${az_name} is running.. this may take a hot minute..."
             local running
-            running=$(az vm show -d -g "${rg}" --name "${az_name}" --query "powerState" -o tsv 2>/dev/null || echo "VM stopped")
+            running=$(az vm show -d -g "${rg}" --name "${az_name}" --query "powerState" -o tsv 2>/dev/null </dev/null || echo "VM stopped")
 
             if [[ "${running,,}" == *"stopped"* ]]; then
                 echo "Launching ${vm} (${az_name})..."
@@ -368,8 +371,8 @@ function bastion(){
             local tunnel_was_running="false"
             
             # Use netstat to check if the specific port is already bound locally (LISTENING)
-            # This is vastly more reliable than parsing the MSYS2 ps process tree for python.exe arguments
-                if netstat -an | egrep -q "(127.0.0.1|0.0.0.0):${port}.*LISTEN"; then
+            netstat -an > /tmp/netstat.out 2>/dev/null
+            if egrep "(127.0.0.1|0.0.0.0):${port}.*LISTEN" /tmp/netstat.out >/dev/null || [[ "$(ps -ef | grep "az ssh vm" | grep "${az_name}" | wc -l)" -gt 0 ]]; then
                 echo "Bastion for ${vm} port forwarding is already running using port ${port}"
                 echo "${port}" > "${HOME}/.bastion_fwd_ports_${vm}"
                 tunnel_was_running="true"
@@ -396,13 +399,10 @@ function bastion(){
                 else
                     echo "Waiting for new tunnel to stabilize on port ${port}..."
                     local attempts=0
-                    while ! netstat -an | egrep -q "(127.0.0.1|0.0.0.0):${port}.*LISTEN"; do
-                        if (( attempts > 15 )); then
-                            echo "Warning: Tunnel didn't seem to stabilize after 15 seconds. Attempting SSH anyway..."
-                            break
-                        fi
+                    netstat -an > /tmp/netstat.out 2>/dev/null
+                    while ! egrep "(127.0.0.1|0.0.0.0):${port}.*LISTEN" /tmp/netstat.out >/dev/null; do
                         sleep 1
-                        ((attempts++))
+                        netstat -an > /tmp/netstat.out 2>/dev/null
                     done
                 fi
                 
@@ -438,11 +438,12 @@ function bastion(){
                     --resource-group "${bastion_rg}" \
                     --target-resource-id "${VMID}" \
                     --auth-type AAD \
-                    --username "${SSH_TARGET_USER}"
+                    --username "${SSH_TARGET_USER}" </dev/null
             else
                 # Background Mode
                 local tunnel_was_running="false"
-            if netstat -an | egrep -q "(127.0.0.1|0.0.0.0):${port}.*LISTEN"; then
+            netstat -an > /tmp/netstat.out 2>/dev/null
+            if egrep "(127.0.0.1|0.0.0.0):${port}.*LISTEN" /tmp/netstat.out >/dev/null; then
                     echo "Bastion for ${vm} port forwarding is already running using port ${port}"
                     echo "${port}" > "${HOME}/.bastion_fwd_ports_${vm}"
                     tunnel_was_running="true"
@@ -482,7 +483,7 @@ function bastion(){
             if [[ -z "$jumpbox_ip" ]]; then
                 echo "Obtaining IP address of ${az_name} from Azure... this may take a minute..."
                 jumpbox_ip=$(az vm list-ip-addresses -g "${rg}" -n "${az_name}" \
-                    --query "[].virtualMachine.network.publicIpAddresses[].ipAddress" -o tsv)
+                    --query "[].virtualMachine.network.publicIpAddresses[].ipAddress" -o tsv </dev/null)
                 
                 # Strip potential carriage returns
                 jumpbox_ip=$(echo "$jumpbox_ip" | tr -d '\r')

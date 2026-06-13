@@ -33,20 +33,10 @@ fi
 
 # ==============================================================================
 # 2. SSH & Identity
+# OpenSSH agent management is handled by 15-ssh_agent.sh (cross-platform).
+# This section only covers Windows-specific Pageant/plink integration.
 # ==============================================================================
-sshagentpid=$(ps -ef | grep ssh-agent)
-if [[ -z ${sshagentpid} ]]; then
-    output=$(ssh-agent)
-    sshagentpid=$(ps -ef | grep ssh-agent)
-    sshagentpid=${sshagentpid#REDMOND+ *}
-    read -r sshagentpid _ <<< "${sshagentpid}"
-    echo ${output} > /tmp/${sshagentpid}.sshagent
-    eval ${output}; ssh-add ~/.ssh/id_ed25519
-else
-    sshagentpid=${sshagentpid#REDMOND+ *}
-    read -r sshagentpid _ <<< "${sshagentpid}"
-    source /tmp/${sshagentpid}.sshagent
-fi
+
 # ==============================================================================
 # Handle Pageant (for plink) - Only execute on Windows (MSYS/MINGW/CYGWIN)
 # ==============================================================================
@@ -69,14 +59,12 @@ if [[ "${OSTYPE}" == "msys"* || "${OSTYPE}" == "cygwin"* ]]; then
     # 3. Load Keys if Pageant was found and directory exists
     if [[ -n "${PAGEANT_EXE}" && -d "${PPK_DIR}" ]]; then
         # Check if Pageant is running
-        if ! tasklist.exe 2>/dev/null | grep -iq "pageant.exe"; then
-            # Not running: start it and pass all keys as arguments.
-            # We use parameter expansion to prepend the directory to each array element
-            (cd "${PPK_DIR}" && "${PAGEANT_EXE}" "${PPK_FILES[@]}" &)
-        else
-            # Already running: pass keys again to ensure they are loaded in memory
-            (cd "${PPK_DIR}" && "${PAGEANT_EXE}" "${PPK_FILES[@]}")
-        fi
+        # To avoid pipe hangs with native Windows executables on MSYS2/Cygwin,
+        # we run tasklist inside a background job with a timeout, or bypass it entirely
+        # if tasklist itself is prone to hanging on this system.
+        # Actually, since Pageant just silently accepts keys if it's already running,
+        # we can safely skip the tasklist check and always try to load them in the background.
+        (cd "${PPK_DIR}" && "${PAGEANT_EXE}" "${PPK_FILES[@]}" &) >/dev/null 2>&1
     fi
 fi
 
