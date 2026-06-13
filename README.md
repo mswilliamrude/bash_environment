@@ -16,6 +16,7 @@ A modular, cross-platform shell environment built around a declarative Azure Bas
 .bastion_topology.conf.example  # Template for declarative VM configuration
 .bastion_profiles/           # Escape hatch scripts for edge-case topologies
 games/                       # ASCII terminal games (Space Invaders)
+scripts/                     # Standalone utilities (invoked directly, not sourced)
 ```
 
 ## The Problem It Solves
