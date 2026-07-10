@@ -444,14 +444,68 @@ function bastion(){
             local VMID=$(get_vmid "${rg}" "${az_name}")
             
             if [[ "$BASTION_MODE" == "ssh" ]]; then
-                # Interactive mode: use native Entra ID auth
-                echo "Mode: SSH Interactive. Establishing connection to ${az_name} via Entra ID Bastion..."
+                # Interactive mode: first establish background tunnel + port forwards, then Entra SSH
+                echo "Mode: SSH Interactive with port forwards..."
                 
-                if [[ ${#dynamic_ssh_args[@]} -gt 0 ]]; then
-                    echo "WARNING: Dynamic port forwards (-L) are not supported by 'az network bastion ssh'."
-                    echo "Use 'bastion ${vm}' (no ssh) to establish background tunnel with port forwards first."
+                # Start background tunnel if not already running
+                local tunnel_was_running="false"
+                netstat -an > /tmp/netstat.out 2>/dev/null
+                if egrep "(127.0.0.1|0.0.0.0):${port}.*LISTEN" /tmp/netstat.out >/dev/null; then
+                    echo "Bastion tunnel already running on port ${port}"
+                    tunnel_was_running="true"
+                else
+                    echo "Starting background tunnel on port ${port}..."
+                    echo "${port}" > "${HOME}/.bastion_fwd_ports_${vm}"
+                    az network bastion tunnel \
+                        --name "${bastion_name}" \
+                        --resource-group "${bastion_rg}" \
+                        --target-resource-id "${VMID}" \
+                        --resource-port 22 \
+                        --port "${port}" > /dev/null 2>&1 &
+                    
+                    # Wait for tunnel
+                    local wait_count=0
+                    local max_wait=30
+                    while (( wait_count < max_wait )); do
+                        netstat -an > /tmp/netstat.out 2>/dev/null
+                        if egrep "(127.0.0.1|0.0.0.0):${port}.*LISTEN" /tmp/netstat.out >/dev/null; then
+                            break
+                        fi
+                        sleep 1
+                        (( wait_count++ ))
+                    done
+                    
+                    if (( wait_count >= max_wait )); then
+                        echo "ERROR: Tunnel failed to start within ${max_wait} seconds."
+                        return 1
+                    fi
+                    echo "Tunnel ready."
                 fi
-
+                
+                # Set up background port forwards if defined
+                if [[ ${#dynamic_ssh_args[@]} -gt 0 ]]; then
+                    local fwd_user="${VM_PROPS[${vm}_fwd_user]:-${SSH_TARGET_USER}}"
+                    local fwd_identity="${VM_PROPS[${vm}_fwd_identity]:-}"
+                    local identity_args=()
+                    [[ -n "$fwd_identity" ]] && identity_args=("-i" "$fwd_identity")
+                    
+                    echo "Establishing port forwards: ${VM_PROPS[${vm}_az_tunnels]}"
+                    ssh -p "${port}" "${identity_args[@]}" "${dynamic_ssh_args[@]}" -N -f \
+                        -o StrictHostKeyChecking=no \
+                        -o ExitOnForwardFailure=yes \
+                        -o ServerAliveInterval=60 \
+                        -o ServerAliveCountMax=3 \
+                        "${fwd_user}@localhost" 2>/dev/null
+                    
+                    if [[ $? -eq 0 ]]; then
+                        echo "Port forwards active."
+                    else
+                        echo "WARNING: Port forward SSH failed."
+                    fi
+                fi
+                
+                # Now launch interactive Entra SSH
+                echo "Launching Entra ID SSH session..."
                 az network bastion ssh \
                     --name "${bastion_name}" \
                     --resource-group "${bastion_rg}" \
