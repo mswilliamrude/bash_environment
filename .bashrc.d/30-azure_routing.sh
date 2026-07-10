@@ -370,15 +370,14 @@ function bastion(){
             # 1. Ensure background port-forwarding tunnel is running
             local tunnel_was_running="false"
             
-            # Use netstat to check if the specific port is already bound locally (LISTENING)
             netstat -an > /tmp/netstat.out 2>/dev/null
-            if egrep "(127.0.0.1|0.0.0.0):${port}.*LISTEN" /tmp/netstat.out >/dev/null || [[ "$(ps -ef | grep "az ssh vm" | grep "${az_name}" | wc -l)" -gt 0 ]]; then
-                echo "Bastion for ${vm} port forwarding is already running using port ${port}"
+            if egrep "(127.0.0.1|0.0.0.0):${port}.*LISTEN" /tmp/netstat.out >/dev/null; then
+                echo "Bastion tunnel already running on port ${port}"
                 echo "${port}" > "${HOME}/.bastion_fwd_ports_${vm}"
                 tunnel_was_running="true"
             else
                 local VMID=$(get_vmid "${rg}" "${az_name}")
-                echo "Creating bastion tunnel using local port ${port}"
+                echo "Creating bastion tunnel on local port ${port}..."
                 echo "${port}" > "${HOME}/.bastion_fwd_ports_${vm}"
 
                 az network bastion tunnel \
@@ -389,25 +388,48 @@ function bastion(){
                     --port "${port}" > /dev/null 2>&1 &
             fi
 
-            # 2. If 'ssh' mode was requested, open interactive shell
-            if [[ "$BASTION_MODE" == "ssh" ]]; then
-                echo "Mode: SSH Interactive. Establishing connection to ${az_name} via Bastion..."
-                
-                # Fast-path: Wait actively for the tunnel port to open instead of a dumb sleep
-                if [[ "$tunnel_was_running" == "true" ]]; then
-                    echo "Tunnel already established. Connecting immediately..."
-                else
-                    echo "Waiting for new tunnel to stabilize on port ${port}..."
-                    local attempts=0
+            # 2. Wait for tunnel to be ready (both modes need this)
+            if [[ "$tunnel_was_running" != "true" ]]; then
+                echo "Waiting for bastion tunnel on port ${port}..."
+                local wait_count=0
+                local max_wait=30
+                while (( wait_count < max_wait )); do
                     netstat -an > /tmp/netstat.out 2>/dev/null
-                    while ! egrep "(127.0.0.1|0.0.0.0):${port}.*LISTEN" /tmp/netstat.out >/dev/null; do
-                        sleep 1
-                        netstat -an > /tmp/netstat.out 2>/dev/null
-                    done
-                fi
+                    if egrep "(127.0.0.1|0.0.0.0):${port}.*LISTEN" /tmp/netstat.out >/dev/null; then
+                        break
+                    fi
+                    sleep 1
+                    (( wait_count++ ))
+                done
                 
-                # Apply dynamic forwarding args if defined
+                if (( wait_count >= max_wait )); then
+                    echo "ERROR: Tunnel failed to start within ${max_wait} seconds."
+                    return 1
+                fi
+                echo "Tunnel ready."
+            fi
+
+            # 3. Handle connection mode
+            if [[ "$BASTION_MODE" == "ssh" ]]; then
+                echo "Mode: SSH Interactive. Connecting to ${az_name}..."
                 ssh -p "${port}" "${dynamic_ssh_args[@]}" -o StrictHostKeyChecking=no "${SSH_TARGET_USER}@localhost"
+            else
+                # Background mode: set up port forwards if defined
+                if [[ ${#dynamic_ssh_args[@]} -gt 0 ]]; then
+                    echo "Establishing port forwards: ${VM_PROPS[${vm}_az_tunnels]}"
+                    ssh -p "${port}" "${dynamic_ssh_args[@]}" -N -f \
+                        -o StrictHostKeyChecking=no \
+                        -o ExitOnForwardFailure=yes \
+                        -o ServerAliveInterval=60 \
+                        -o ServerAliveCountMax=3 \
+                        "${SSH_TARGET_USER}@localhost" 2>/dev/null
+                    
+                    if [[ $? -eq 0 ]]; then
+                        echo "Port forwards active."
+                    else
+                        echo "WARNING: Port forward SSH failed."
+                    fi
+                fi
             fi
             ;;
 
@@ -415,22 +437,19 @@ function bastion(){
             # ------------------------------------------------------------------
             # ENGINE: Flat Topology (Entra ID Auth / AAD Token)
             # ------------------------------------------------------------------
+            # For Entra ID interactive SSH: use `az network bastion ssh --auth-type AAD`
+            # For background tunnels with port forwards: use standard bastion tunnel
+            #   then SSH through it (Entra auth isn't needed for the tunnel itself)
+            # ------------------------------------------------------------------
             local VMID=$(get_vmid "${rg}" "${az_name}")
             
-            # Note: For Entra ID, we generally don't background the Bastion tunnel 
-            # if we are doing direct SSH because `az network bastion ssh` handles both.
-            # However, if we need port forwarding without an interactive shell, 
-            # we must fall back to the standard tunnel mechanism.
-            
             if [[ "$BASTION_MODE" == "ssh" ]]; then
+                # Interactive mode: use native Entra ID auth
                 echo "Mode: SSH Interactive. Establishing connection to ${az_name} via Entra ID Bastion..."
                 
-                # Unfortunately, `az network bastion ssh` does not support passing arbitrary -L flags natively.
-                # If we have dynamic_ssh_args, we cannot easily use the native wrapper. 
-                # (A known limitation of the Azure CLI Entra ID implementation).
                 if [[ ${#dynamic_ssh_args[@]} -gt 0 ]]; then
-                    echo "WARNING: Dynamic port forwards (-L) are not supported natively by 'az network bastion ssh'."
-                    echo "Traffic will not be forwarded. Use standard 'flat' or 'tiered' topologies for advanced routing."
+                    echo "WARNING: Dynamic port forwards (-L) are not supported by 'az network bastion ssh'."
+                    echo "Use 'bastion ${vm}' (no ssh) to establish background tunnel with port forwards first."
                 fi
 
                 az network bastion ssh \
@@ -440,15 +459,16 @@ function bastion(){
                     --auth-type AAD \
                     --username "${SSH_TARGET_USER}" </dev/null
             else
-                # Background Mode
+                # Background mode: establish tunnel then set up port forwards
                 local tunnel_was_running="false"
-            netstat -an > /tmp/netstat.out 2>/dev/null
-            if egrep "(127.0.0.1|0.0.0.0):${port}.*LISTEN" /tmp/netstat.out >/dev/null; then
-                    echo "Bastion for ${vm} port forwarding is already running using port ${port}"
+                
+                netstat -an > /tmp/netstat.out 2>/dev/null
+                if egrep "(127.0.0.1|0.0.0.0):${port}.*LISTEN" /tmp/netstat.out >/dev/null; then
+                    echo "Bastion tunnel already running on port ${port}"
                     echo "${port}" > "${HOME}/.bastion_fwd_ports_${vm}"
                     tunnel_was_running="true"
                 else
-                    echo "Mode: Background Tunnel. Establishing connection to ${az_name} on local port ${port}..."
+                    echo "Mode: Background Tunnel. Establishing bastion tunnel on local port ${port}..."
                     echo "${port}" > "${HOME}/.bastion_fwd_ports_${vm}"
 
                     az network bastion tunnel \
@@ -457,6 +477,44 @@ function bastion(){
                         --target-resource-id "${VMID}" \
                         --resource-port 22 \
                         --port "${port}" > /dev/null 2>&1 &
+                fi
+                
+                # Wait for tunnel to be ready before setting up port forwards
+                if [[ "$tunnel_was_running" != "true" ]]; then
+                    echo "Waiting for bastion tunnel on port ${port}..."
+                    local wait_count=0
+                    local max_wait=30
+                    while (( wait_count < max_wait )); do
+                        netstat -an > /tmp/netstat.out 2>/dev/null
+                        if egrep "(127.0.0.1|0.0.0.0):${port}.*LISTEN" /tmp/netstat.out >/dev/null; then
+                            break
+                        fi
+                        sleep 1
+                        (( wait_count++ ))
+                    done
+                    
+                    if (( wait_count >= max_wait )); then
+                        echo "ERROR: Tunnel failed to start within ${max_wait} seconds."
+                        return 1
+                    fi
+                    echo "Tunnel ready."
+                fi
+                
+                # Set up background port forwards if defined
+                if [[ ${#dynamic_ssh_args[@]} -gt 0 ]]; then
+                    echo "Establishing port forwards: ${VM_PROPS[${vm}_az_tunnels]}"
+                    ssh -p "${port}" "${dynamic_ssh_args[@]}" -N -f \
+                        -o StrictHostKeyChecking=no \
+                        -o ExitOnForwardFailure=yes \
+                        -o ServerAliveInterval=60 \
+                        -o ServerAliveCountMax=3 \
+                        "${SSH_TARGET_USER}@localhost" 2>/dev/null
+                    
+                    if [[ $? -eq 0 ]]; then
+                        echo "Port forwards active."
+                    else
+                        echo "WARNING: Port forward SSH failed. Tunnel is up but forwards not established."
+                    fi
                 fi
             fi
             ;;
