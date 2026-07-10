@@ -457,7 +457,7 @@ function bastion(){
                     --resource-group "${bastion_rg}" \
                     --target-resource-id "${VMID}" \
                     --auth-type AAD \
-                    --username "${SSH_TARGET_USER}" </dev/null
+                    --username "${SSH_TARGET_USER}"
             else
                 # Background mode: establish tunnel then set up port forwards
                 local tunnel_was_running="false"
