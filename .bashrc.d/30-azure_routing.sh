@@ -502,13 +502,19 @@ function bastion(){
                 
                 # Set up background port forwards if defined
                 if [[ ${#dynamic_ssh_args[@]} -gt 0 ]]; then
+                    # Allow override of SSH user/identity for port forwards (Entra VMs need user@domain.com)
+                    local fwd_user="${VM_PROPS[${vm}_fwd_user]:-${SSH_TARGET_USER}}"
+                    local fwd_identity="${VM_PROPS[${vm}_fwd_identity]:-}"
+                    local identity_args=()
+                    [[ -n "$fwd_identity" ]] && identity_args=("-i" "$fwd_identity")
+                    
                     echo "Establishing port forwards: ${VM_PROPS[${vm}_az_tunnels]}"
-                    ssh -p "${port}" "${dynamic_ssh_args[@]}" -N -f \
+                    ssh -p "${port}" "${identity_args[@]}" "${dynamic_ssh_args[@]}" -N -f \
                         -o StrictHostKeyChecking=no \
                         -o ExitOnForwardFailure=yes \
                         -o ServerAliveInterval=60 \
                         -o ServerAliveCountMax=3 \
-                        "${SSH_TARGET_USER}@localhost" 2>/dev/null
+                        "${fwd_user}@localhost" 2>/dev/null
                     
                     if [[ $? -eq 0 ]]; then
                         echo "Port forwards active."
