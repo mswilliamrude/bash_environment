@@ -4,9 +4,9 @@ Terminal games written in pure bash. No dependencies beyond a UTF-8 terminal.
 
 ## Games
 
-### `invaders.sh` - ASCII Space Invaders (v3)
+### `invaders.sh` - ASCII Space Invaders
 
-A complete Space Invaders clone in 467 lines of bash. Features difficulty
+A complete Space Invaders clone in 227 lines of bash. Features difficulty
 selection, level progression, enemy fire, lives, speed-up-as-they-die
 mechanic, hit flash effects, and between-level splash screens.
 

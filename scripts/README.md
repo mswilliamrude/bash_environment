@@ -22,6 +22,87 @@ and - having no search tool available - simply built one on the spot in
 
 ---
 
+### `rr_matrix.sh` - Matrix Digital Rain (Rickroll Edition)
+
+Matrix-style "digital rain" animation with rickroll lyrics scrolling down
+in green text. Features Cyrillic characters and box-drawing symbols mixed
+with the English lyrics for that authentic Matrix aesthetic.
+
+```bash
+# Default density (100% = maximum visual chaos)
+./scripts/rr_matrix.sh
+
+# Adjust rain density via COMPLEXITY (0-100)
+COMPLEXITY=50 ./scripts/rr_matrix.sh   # medium density
+COMPLEXITY=10 ./scripts/rr_matrix.sh   # sparse rain
+COMPLEXITY=1  ./scripts/rr_matrix.sh   # minimal (zen mode)
+```
+
+**Controls:** `Ctrl+C` to exit (restores terminal state cleanly).
+
+**How it works:** Each column has an independent "drip" that scrolls down,
+leaving a fading trail. The spawn probability is calculated from terminal
+dimensions and the COMPLEXITY percentage. At COMPLEXITY=100, approximately
+1% of screen cells are filled with active streams at any moment.
+
+**Lines:** 171
+
+---
+
+### `animated_rick.sh` - Animated Rick Astley ASCII Art
+
+Frame-by-frame ASCII animation of Rick Astley rendered in 24-bit ANSI
+color escape sequences. This is the full rickroll experience - a complete
+animated portrait that plays in your terminal.
+
+```bash
+./scripts/animated_rick.sh
+```
+
+**Requirements:** Terminal with 24-bit (truecolor) support.  
+**Controls:** `Ctrl+C` to exit.
+
+**Technical notes:** The script contains embedded ANSI escape sequences
+that encode the RGB color values for each character cell. Each "frame"
+is a 200-column wide image. The file is 258KB because it literally
+contains the pixel data as escape codes.
+
+**Lines:** 353
+
+---
+
+### `crawl_rick.sh` - Star Wars Crawl (Rickroll Edition)
+
+Star Wars opening crawl effect with rickroll lyrics scrolling upward
+over a static Rick Astley ASCII art background. Text transitions through
+5 font sizes (large at bottom → tiny at top) and fades from bright
+Star Wars yellow through amber to dark as it recedes.
+
+```bash
+./scripts/crawl_rick.sh
+```
+
+**Requirements:**
+- `toilet` with figlet fonts (for the multi-size text rendering)
+- Terminal with 24-bit color support
+- Minimum ~80 columns recommended
+
+**How it works:** The script draws the ANSI art background once, then
+renders each chorus line through progressively smaller toilet fonts as
+it scrolls upward. Only the character cells occupied by text are
+overwritten; the rest of the image shows through.
+
+**Fonts used (bottom to top):**
+- `mono9` - largest, brightest (entry point)
+- `letter` - large ASCII
+- `smblock` - medium
+- `pagga` - small
+- `smbraille` - tiny, dim (exit point)
+
+**Lines:** 547
+
+---
+
 ## See Also
 
 Other scriptable components in this repo:
@@ -34,4 +115,4 @@ Other scriptable components in this repo:
 | `.bashrc.d/20-vim.sh` | Vim configuration and aliases |
 | `.bashrc.d/30-azure_routing.sh` | Azure bastion topology routing (600-line beast) |
 | `.bashrc.d/30-history.sh` | Shell history management |
-| `games/invaders.sh` | Pure bash ASCII Space Invaders (v3, 467 lines) |
+| `games/invaders.sh` | Pure bash ASCII Space Invaders (v3, 227 lines) |
