@@ -6,23 +6,43 @@ if [[ "${OSTYPE}" != "msys"* && "${OSTYPE}" != "cygwin"* ]]; then
     return 0
 fi
 
-# Append/prepend native toolchains to the path depending on the environment
-# Detect the *running* environment using MSYSTEM (set by MSYS2: UCRT64, MINGW64, MSYS, etc.)
-# This ensures the MSYS2 block wins even when Git for Windows is also installed on disk.
-if [[ -n "${MSYSTEM}" && -e /c/msys64/usr/bin/bash.exe ]]; then
-    # MSYS2 Native Environment (e.g. UCRT64 or MINGW64)
-    # 1. Base MSYS2 and System32 paths
-    BASE_PATHS="/ucrt64/bin:/usr/local/bin:/usr/bin:/bin:/c/Windows/System32:/c/Windows:/c/Windows/System32/Wbem:/c/Windows/System32/WindowsPowerShell/v1.0"
-    
-    # 2. Add common CLI tools to the path if their directories exist
-    AZURE_PATH="/c/Program Files/Microsoft SDKs/Azure/CLI2/wbin"
-    PUTTY_PATH="/c/Program Files/PuTTY"
-    
-    [[ -d "$AZURE_PATH" ]] && BASE_PATHS="${BASE_PATHS}:${AZURE_PATH}"
-    [[ -d "$PUTTY_PATH" ]] && BASE_PATHS="${BASE_PATHS}:${PUTTY_PATH}"
-    
-    # 3. Export combined path, retaining whatever else MSYS2 inherited
-    export PATH="${BASE_PATHS}:/usr/bin/site_perl:/usr/bin/vendor_perl:/usr/bin/core_perl:${PATH}"
+# Detect which runtime is CURRENTLY EXECUTING, not just what's installed on disk.
+# /ucrt64/bin is an MSYS2-only path — Git for Windows never has it.
+# This discriminates correctly even when both are installed, and regardless of
+# which MSYS2 launcher was used (bash.exe = MSYS subsystem, ucrt64.exe = UCRT64).
+if [[ -d "/ucrt64/bin" ]]; then
+    # MSYS2 environment — /ucrt64/bin exists regardless of launch subsystem.
+    # Guard against re-sourcing: only rebuild PATH if /ucrt64/bin isn't already leading.
+    if [[ "${PATH%%:*}" != "/ucrt64/bin" ]]; then
+
+        # 1. Core MSYS2 toolchain paths — order matters, /ucrt64/bin leads
+        PATH="/ucrt64/bin"
+        PATH="${PATH}:/usr/local/bin"
+        PATH="${PATH}:/usr/bin"
+        PATH="${PATH}:/bin"
+
+        # 2. Windows system paths
+        PATH="${PATH}:/c/Windows/System32"
+        PATH="${PATH}:/c/Windows"
+        PATH="${PATH}:/c/Windows/System32/Wbem"
+        PATH="${PATH}:/c/Windows/System32/WindowsPowerShell/v1.0"
+
+        # 3. Optional CLI tools — only added if installed
+        [[ -d "/c/Program Files/Microsoft SDKs/Azure/CLI2/wbin" ]] && \
+            PATH="${PATH}:/c/Program Files/Microsoft SDKs/Azure/CLI2/wbin"
+        [[ -d "/c/Program Files/PuTTY" ]] && \
+            PATH="${PATH}:/c/Program Files/PuTTY"
+
+        # 4. Perl paths (MSYS2 standard)
+        PATH="${PATH}:/usr/bin/site_perl:/usr/bin/vendor_perl:/usr/bin/core_perl"
+
+        export PATH
+    fi
+
+elif [[ -e "/c/Program Files/Git/bin/bash.exe" ]]; then
+    # Git for Windows only — no MSYS2 present
+    # Prepend Python; leave the rest of the inherited Windows PATH intact
+    export PATH="/c/python/3.9.25/:${PATH}"
 fi
 
 #export PATH="/usr/local/bin":${PATH}

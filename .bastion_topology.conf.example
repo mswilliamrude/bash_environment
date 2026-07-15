@@ -80,13 +80,63 @@ BASTION_VMS=(
 # The routing engine dynamically queries these based on the topology type.
 #
 # Recognized Keys:
-#   <alias>_az_tunnels       : Space-separated list of "local_port:remote_ip:remote_port" injected into base SSH tunnel.
-#   <alias>_plink_tunnels    : Space-separated list of subshell tunnels injected into the background plink process.
-#   <alias>_plink_entry_port : (Optional) Overrides the default subshell entry port (default: 2022).
-#   <alias>_fwd_ports        : Space-separated list of all local ports to register for cleanup via `cleanup_tunnels`.
-#   <alias>_bastion_name     : Overrides the target Azure Bastion resource name for this specific VM.
-#   <alias>_bastion_rg       : Overrides the Resource Group where the Azure Bastion is located.
-#   global_default_bastion   : Fallback bastion name used if an alias-specific bastion is not provided.
+#
+#   <alias>_az_tunnels
+#       Space-separated SSH -L port forward mappings injected into the base
+#       Bastion tunnel SSH command. Use this to expose private network services
+#       (databases, APIs, Redis) on localhost without a separate tunnel step.
+#       Format: "local_port:remote_ip:remote_port"
+#       Example: "5432:10.0.1.5:5432 6379:10.0.1.6:6379"
+#
+#   <alias>_plink_tunnels
+#       Space-separated tunnel mappings injected into the background plink
+#       subshell process. Used in 'tiered' topology to reach deep inner hosts
+#       that are only accessible from the jumpbox, not from the Bastion.
+#       Format: "local_port:remote_ip:remote_port"
+#       Example: "2023:192.168.1.25:22 8443:172.16.30.2:443"
+#
+#   <alias>_plink_entry_port
+#       Overrides the default port (2022) that plink uses to enter the jumpbox
+#       for the subshell tunnel session. Only needed if the jumpbox SSH port
+#       forwarded by az_tunnels is not 2022.
+#       Example: "2022"
+#
+#   <alias>_fwd_ports
+#       Space-separated list of ALL local ports opened by this alias (az_tunnels
+#       + plink_tunnels combined). Populated automatically by bastion_wizard.
+#       Used by `cleanup_tunnels <alias>` to find and kill the right processes.
+#       Example: "5432 6379 2023 8443"
+#
+#   <alias>_bastion_name
+#       Overrides the Azure Bastion resource name for this specific VM.
+#       Use when a VM is only reachable via a non-default Bastion instance
+#       (e.g., a VM in a secure/isolated subscription with its own Bastion).
+#       Example: "bst-secure-isolated-01"
+#
+#   <alias>_bastion_rg
+#       Overrides the Resource Group where the above Bastion is located.
+#       Only needed when <alias>_bastion_name is set AND the Bastion lives
+#       in a different Resource Group than the VM itself.
+#       Example: "rg-secure-net"
+#
+#   <alias>_fwd_user
+#       SSH username used specifically for the port-forward SSH session.
+#       Only relevant for 'flat-entra' VMs where the interactive session uses
+#       an Entra ID (AAD) certificate, but the port-forward SSH leg requires
+#       a regular key-based identity (different username format).
+#       Example: "williamrude@microsoft.com"
+#
+#   <alias>_fwd_identity
+#       Path to the SSH private key used for the port-forward SSH session.
+#       Only relevant for 'flat-entra' VMs. If omitted, the ssh-agent default
+#       key is used. Supports ~ expansion.
+#       Example: "~/.ssh/williamrude_microsoft"
+#
+#   global_default_bastion
+#       Fallback Azure Bastion resource name used for any VM that does not
+#       have an alias-specific <alias>_bastion_name override. Every environment
+#       should define this — without it, connections will fail loudly.
+#       Example: "bst-default-region-01"
 
 declare -A VM_PROPS
 
@@ -102,6 +152,16 @@ VM_PROPS["jbox_fwd_ports"]="2022 13389 2023 2024"
 # Overrides the default bastion host to use an isolated, highly secure bastion deployment
 VM_PROPS["secvdi_bastion_name"]="bst-secure-isolated-01"
 VM_PROPS["secvdi_bastion_rg"]="rg-secure-net"
+
+# --- Properties for flat-entra VMs that also need port forwards (e.g., sentinelprism) ---
+# The interactive session uses Entra ID (az network bastion ssh --auth-type AAD),
+# but the port-forward SSH leg needs a regular key-based identity.
+# fwd_user:     the UPN / SSH username for the port-forward session
+# fwd_identity: path to the SSH private key for the port-forward session
+VM_PROPS["sentinelprism_az_tunnels"]="8080:10.0.10.6:8080 8081:10.0.10.7:8080"
+VM_PROPS["sentinelprism_fwd_ports"]="8080 8081"
+VM_PROPS["sentinelprism_fwd_user"]="user@contoso.com"
+VM_PROPS["sentinelprism_fwd_identity"]="~/.ssh/id_rsa_contoso"
 
 # --- Global defaults ---
 # Used by standard 'flat' VMs if no specific profile exists
