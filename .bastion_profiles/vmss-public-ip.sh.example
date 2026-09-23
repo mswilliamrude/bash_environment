@@ -1,0 +1,75 @@
+#!/bin/bash
+# ==============================================================================
+# .bastion_profiles/vmss-public-ip.sh.example
+# Architecture: VM Scale Set fronted by a standalone Public IP resource
+# ==============================================================================
+# Scenario:
+#   The topology alias points at a NAME that is NOT a standalone VM. It is a
+#   VM Scale Set (VMSS), and its reachable address lives on a dedicated
+#   Public IP resource of the SAME name (commonly a load-balancer front end).
+#
+# The trap:
+#   'az vm list-ip-addresses -g <rg> -n <name>' returns an EMPTY result with
+#   exit code 0 for a VMSS or a bare Public IP resource. The caller sees no
+#   error, just an empty IP — and every downstream tunnel silently fails.
+#
+# The fix:
+#   Use the shared resolve_target_ip() helper (defined in
+#   .bashrc.d/30-azure_routing.sh). It walks resource types in order —
+#   VM private -> VMSS private -> VM public -> Public IP resource — and
+#   returns the first hit, caching it for 10h. Private is preferred by
+#   default; pass a third arg of 1 to prefer public (needed here, since a
+#   VMSS front-end is reached via its public IP).
+#
+# Environment variables available (set by the bastion() dispatcher):
+#   vm, az_name, rg, sub, port, vtype
+#   BASTION_MODE   ('ssh' if the user ran 'bastion <alias> ssh')
+# ==============================================================================
+
+# Clean up any stale tunnels mapped to this target
+cleanup_tunnels "$vm"
+
+# Register forwarded ports for future cleanup (space-separated local ports)
+echo "2022 13389" > "${HOME}/.bastion_fwd_ports_${vm}"
+
+# ------------------------------------------------------------------------------
+# Resolve the IP WITHOUT hardcoding the resource type.
+# prefer_public=1 because a VMSS front-end is reached via its public IP.
+# ------------------------------------------------------------------------------
+echo "--> Resolving IP for ${az_name} (rg: ${rg})..."
+target_ip=$(resolve_target_ip "${rg}" "${az_name}" 1)
+
+if [[ -z "${target_ip}" ]]; then
+    echo "ERROR: could not resolve an IP for ${az_name}." >&2
+    echo "       Verify the name/RG in ~/.bastion_topology.conf and that the" >&2
+    echo "       resource (VM / VMSS / Public IP) actually exists." >&2
+    return 1 2>/dev/null || exit 1
+fi
+echo "    ${az_name} => ${target_ip}"
+
+# ------------------------------------------------------------------------------
+# Establish the connection. Tunnel targets below are illustrative — replace the
+# x.x.x.x:port pairs with your own internal destinations.
+# ------------------------------------------------------------------------------
+if [[ "$BASTION_MODE" == "ssh" ]]; then
+    echo "Mode: SSH Interactive. Connecting to ${az_name}..."
+    az ssh vm --ip "${target_ip}" -- \
+        -o StrictHostKeyChecking=no \
+        -L 2022:x.x.x.x:22 \
+        -L 13389:x.x.x.x:3389
+else
+    echo "Mode: Background Tunnel. Connecting to ${az_name}..."
+    az ssh vm --ip "${target_ip}" -- \
+        -o StrictHostKeyChecking=no \
+        -N -T \
+        -L 2022:x.x.x.x:22 \
+        -L 13389:x.x.x.x:3389 > /dev/null 2>&1 &
+
+    if [[ $? -eq 0 ]]; then
+        echo "Waiting for the Azure SSH tunnel to establish..."
+        sleep 5
+        echo "Tunnel up. Local ports: 2022 (ssh), 13389 (rdp)."
+    else
+        echo "az ssh vm failed to launch." >&2
+    fi
+fi

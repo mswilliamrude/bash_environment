@@ -89,6 +89,83 @@ function get_vmid(){
 }
 
 
+# ==============================================================================
+# resolve_target_ip — resolve a connectable IP for an Azure target by NAME,
+# without hardcoding whether that name is a VM, a VM Scale Set, or a standalone
+# Public IP resource.
+#
+# Resolution order (private preferred, public as fallback):
+#   1. VM      private IP   (az vm list-ip-addresses)
+#   2. VMSS    private IP   (az vmss nic list — first instance)
+#   3. VM      public  IP   (az vm list-ip-addresses)
+#   4. Public-IP resource   (az network public-ip show)   <- e.g. jbox VMSS LB
+#
+# Why: 'az vm list-ip-addresses' returns EMPTY with exit 0 for a VMSS or a
+# bare Public IP resource, which silently yields an empty address. This helper
+# walks the resource types so a profile never has to guess.
+#
+# Usage:  ip=$(resolve_target_ip "<rg>" "<name>" [prefer_public])
+#   prefer_public=1  flips the order to try public IPs before private.
+#
+# Result is cached for 10h in ~/.bastion_ip_cache_<name> (same pattern as
+# get_vmid). Prints the IP on stdout; returns non-zero if nothing resolves.
+# ==============================================================================
+function resolve_target_ip(){
+    local rg="${1}"
+    local name="${2}"
+    local prefer_public="${3:-0}"
+    local CACHE_FILE="${HOME}/.bastion_ip_cache_${name}"
+    local CACHE_EXPIRY=$(( 10 * 3600 ))
+    local CURRENT_TIME; CURRENT_TIME=$(date +%s)
+    local ip=""
+
+    # Cache hit?
+    if [[ -f "$CACHE_FILE" ]]; then
+        local cache_time cached_ip
+        read -r cache_time cached_ip < "$CACHE_FILE"
+        if (( CURRENT_TIME - cache_time < CACHE_EXPIRY )) && [[ -n "$cached_ip" ]]; then
+            echo "$cached_ip"
+            return 0
+        fi
+    fi
+
+    # --- individual lookup strategies (each prints an IP or nothing) ---
+    local _vm_private _vm_public _vmss_private _pip
+    _vm_private=$(az vm list-ip-addresses -g "$rg" -n "$name" \
+        --query "[].virtualMachine.network.privateIpAddresses[]" -o tsv 2>/dev/null | head -1)
+    _vm_public=$(az vm list-ip-addresses -g "$rg" -n "$name" \
+        --query "[].virtualMachine.network.publicIpAddresses[].ipAddress" -o tsv 2>/dev/null | head -1)
+
+    # VMSS: try the VMSS whose name is "$name" or "$name" without a trailing -NN
+    local vmss_name="${name%-[0-9][0-9]}"
+    _vmss_private=$(az vmss nic list -g "$rg" --vmss-name "$vmss_name" \
+        --query "[0].ipConfigurations[0].privateIPAddress" -o tsv 2>/dev/null | head -1)
+
+    # Standalone Public IP resource named "$name" (the jbox / LB front-end case)
+    _pip=$(az network public-ip show -g "$rg" -n "$name" \
+        --query ipAddress -o tsv 2>/dev/null | head -1)
+
+    # --- pick, honoring the private-first (default) or public-first order ---
+    if (( prefer_public )); then
+        for candidate in "$_vm_public" "$_pip" "$_vm_private" "$_vmss_private"; do
+            [[ -n "$candidate" ]] && { ip="$candidate"; break; }
+        done
+    else
+        for candidate in "$_vm_private" "$_vmss_private" "$_vm_public" "$_pip"; do
+            [[ -n "$candidate" ]] && { ip="$candidate"; break; }
+        done
+    fi
+
+    if [[ -n "$ip" ]]; then
+        echo "${CURRENT_TIME} ${ip}" > "$CACHE_FILE"
+        echo "$ip"
+        return 0
+    fi
+
+    echo "resolve_target_ip: could not resolve any IP for '${name}' in rg '${rg}'" >&2
+    return 1
+}
+
 
 function az_subscription(){
     local verb=${1}; shift
