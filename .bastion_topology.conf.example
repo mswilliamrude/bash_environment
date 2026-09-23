@@ -124,13 +124,13 @@ BASTION_VMS=(
 #       Only relevant for 'flat-entra' VMs where the interactive session uses
 #       an Entra ID (AAD) certificate, but the port-forward SSH leg requires
 #       a regular key-based identity (different username format).
-#       Example: "williamrude@microsoft.com"
+#       Example: "user@contoso.com"
 #
 #   <alias>_fwd_identity
 #       Path to the SSH private key used for the port-forward SSH session.
 #       Only relevant for 'flat-entra' VMs. If omitted, the ssh-agent default
 #       key is used. Supports ~ expansion.
-#       Example: "~/.ssh/williamrude_microsoft"
+#       Example: "~/.ssh/id_entra"
 #
 #   global_default_bastion
 #       Fallback Azure Bastion resource name used for any VM that does not

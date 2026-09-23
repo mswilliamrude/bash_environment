@@ -307,12 +307,12 @@ _bw_collect_fields() {
     # needs a different identity than the Entra interactive session)
     if [[ "${vtype}" == "flat-entra" && -n "${az_tunnels}" ]]; then
         _bw_input "Port Forward User (optional)" \
-            "\nSSH username for the port-forward session.\nflat-entra VMs use Entra ID (AAD) for the\ninteractive session, but port-forward SSH\nneeds a regular key-based identity — which\nmay have a different username format.\ne.g.  williamrude@microsoft.com\nLeave blank to use the VM auth setting." \
+            "\nSSH username for the port-forward session.\nflat-entra VMs use Entra ID (AAD) for the\ninteractive session, but port-forward SSH\nneeds a regular key-based identity — which\nmay have a different username format.\ne.g.  user@contoso.com\nLeave blank to use the VM auth setting." \
             "${existing_fwd_user}" || return 1
         fwd_user="${_BW_VAL}"
 
         _bw_input "Port Forward Identity (optional)" \
-            "\nPath to SSH private key for the port-forward\nsession. Only needed if the key for port\nforwarding differs from your ssh-agent default.\nSupports ~ expansion.\ne.g.  ~/.ssh/williamrude_microsoft\nLeave blank to use ssh-agent default." \
+            "\nPath to SSH private key for the port-forward\nsession. Only needed if the key for port\nforwarding differs from your ssh-agent default.\nSupports ~ expansion.\ne.g.  ~/.ssh/id_entra\nLeave blank to use ssh-agent default." \
             "${existing_fwd_identity}" || return 1
         fwd_identity="${_BW_VAL}"
     fi

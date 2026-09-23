@@ -74,3 +74,33 @@ Below are three advanced architectural scenarios. We have provided working `.exa
          +--------------------------------+
              (2. ssh -p 4444 localhost)
 ```
+
+### Scenario 4: VM Scale Set behind a Public IP resource
+**Profile:** [`vmss-public-ip.sh.example`](vmss-public-ip.sh.example)
+
+**The Challenge:** The alias points at a name that is **not** a standalone VM — it is
+a VM Scale Set (VMSS), and its reachable address lives on a dedicated Public IP
+resource of the same name (often a load-balancer front end). The classic
+`az vm list-ip-addresses` returns **empty with exit code 0** for a VMSS or a bare
+Public IP resource, so a naive profile silently ends up with no IP and the tunnel
+fails for reasons that look unrelated.
+
+**The Fix:** Use the shared [`resolve_target_ip()`](../docs/ip-resolution.md) helper
+(defined in `.bashrc.d/30-azure_routing.sh`). It probes VM → VMSS → Public IP
+resource types in order and returns the first hit, private-first by default (pass `1`
+to prefer public). No hardcoding of resource type; results cached for 10h.
+
+```text
+  [Local Machine]
+         |
+  (1. resolve_target_ip: VM? VMSS? Public IP resource?)
+         |
+   [Public IP: x.x.x.x]  <-- VMSS front end
+         |
+  (2. az ssh vm --ip x.x.x.x)
+         |
+     [VMSS instance]
+```
+
+See [docs/ip-resolution.md](../docs/ip-resolution.md) for the full resolution order,
+caching behavior, and troubleshooting steps.

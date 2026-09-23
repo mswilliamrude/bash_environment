@@ -42,7 +42,7 @@ bastion <alias> [ssh]
   - `flat-entra` — Bastion tunnel with Entra ID (AAD) token authentication
   - `tiered` — Multi-hop routing via jumpbox with nested port forwarding
 - **Cross-Platform** — OS guard clauses isolate Windows-specific logic (`10-windows_env.sh`) from the core engine. Works on Linux, macOS, and Windows (MSYS2/Git Bash/Cygwin).
-- **Performance Caching** — VMID and IP lookups are cached with a 10-hour TTL to avoid repeated Azure API latency. Fast-path detection skips power-state queries when tunnels are already active.
+- **Performance Caching** — VMID and IP lookups are cached with a 10-hour TTL to avoid repeated Azure API latency. Fast-path detection skips power-state queries when tunnels are already active. IP resolution (`resolve_target_ip`) transparently handles VM, VM Scale Set, and standalone Public IP resource targets — see [docs/ip-resolution.md](docs/ip-resolution.md).
 - **Self-Healing** — IP and VMID caches are automatically invalidated on connection failure, forcing a fresh lookup on next attempt.
 - **Escape Hatches** — The `.bastion_profiles/` directory accepts per-VM scripts that bypass the core engine entirely for edge cases (JIT access, VPN/SOCKS proxies, reverse-shell beacons).
 - **SSH Agent Management** — A cross-platform agent script (`15-ssh_agent.sh`) that reuses existing agents, prunes stale tracking files, and auto-loads keys — supporting `/proc` (Linux), `ps` (macOS/BSD), and MSYS2.
@@ -157,7 +157,8 @@ For the full network architecture, see [ARCHITECTURE.md](ARCHITECTURE.md).
 ## Documentation
 
 - [Network Architecture & Topologies](ARCHITECTURE.md) — How `flat`, `flat-entra`, and `tiered` connections work under the hood.
-- [Escape Hatch Profiles](.bastion_profiles/) — Writing custom profile overrides for JIT, VPN, and reverse-shell patterns.
+- [IP Resolution](docs/ip-resolution.md) — How `resolve_target_ip()` turns a topology name into an IP across VM / VMSS / Public IP resource types (private-first, with caching).
+- [Escape Hatch Profiles](.bastion_profiles/) — Writing custom profile overrides for JIT, VPN, reverse-shell, and VMSS/public-IP patterns.
 - [Topology Config Example](.bastion_topology.conf.example) — Fully annotated configuration template with ASCII topology diagram.
 
 ## Prerequisites
