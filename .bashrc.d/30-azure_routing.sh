@@ -677,16 +677,23 @@ function bastion(){
 
             if [[ -z "$jumpbox_ip" ]]; then
                 echo "Obtaining IP address of ${az_name} from Azure... this may take a minute..."
-                jumpbox_ip=$(az vm list-ip-addresses -g "${rg}" -n "${az_name}" \
-                    --query "[].virtualMachine.network.publicIpAddresses[].ipAddress" -o tsv </dev/null)
-                
+                # Use the shared resolver so VM / VMSS / standalone Public IP
+                # resource targets all work. 'az vm list-ip-addresses' alone
+                # returns EMPTY (exit 0) for a VMSS or a bare Public IP resource,
+                # which is what caused tiered jumpboxes fronted by a scale set to
+                # fail with "Failed to retrieve IP address". prefer_public=1 since
+                # a tiered jumpbox is reached over its public IP.
+                jumpbox_ip=$(resolve_target_ip "${rg}" "${az_name}" 1)
+
                 # Strip potential carriage returns
                 jumpbox_ip=$(echo "$jumpbox_ip" | tr -d '\r')
 
                 if [[ -n "$jumpbox_ip" ]]; then
                     echo "${CURRENT_TIME} ${jumpbox_ip}" > "$CACHE_FILE"
                 else
-                    echo "Error: Failed to retrieve IP address for ${az_name}."
+                    echo "Error: Failed to retrieve IP address for ${az_name}." >&2
+                    echo "       Verify the name/RG in ~/.bastion_topology.conf and that" >&2
+                    echo "       the resource (VM / VMSS / Public IP) exists." >&2
                     return 1
                 fi
             fi
