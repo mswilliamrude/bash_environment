@@ -248,7 +248,7 @@ _bw_collect_fields() {
     # Step 6 — Topology Type
     _bw_radiolist "Add VM (6/8) — Topology Type" \
         "\nSelect the routing topology:" \
-        "${vtype:-flat}" flat flat-entra tiered || return 1
+        "${vtype:-flat}" flat flat-entra tiered tiered-bastion || return 1
     vtype="${_BW_VAL}"
 
     # Step 7 — Autostart
@@ -296,18 +296,19 @@ _bw_collect_fields() {
         bastion_rg_override="${_BW_VAL}"
     fi
 
-    if [[ "${vtype}" == "flat" || "${vtype}" == "flat-entra" || "${vtype}" == "tiered" ]]; then
+    if [[ "${vtype}" == "flat" || "${vtype}" == "flat-entra" || "${vtype}" == "tiered" || "${vtype}" == "tiered-bastion" ]]; then
         _bw_input "Port Forwards (optional)" \
             "\nSSH -L mappings injected into the Bastion tunnel.\nExposes private network services (DBs, APIs)\non localhost without a separate tunnel step.\nFormat: local_port:remote_ip:remote_port\ne.g.  5432:10.0.1.5:5432 6379:10.0.1.6:6379\nLeave blank to skip." \
             "${existing_az_tunnels}" || return 1
         az_tunnels="${_BW_VAL}"
     fi
 
-    # fwd_user / fwd_identity only relevant for flat-entra (port-forward SSH
-    # needs a different identity than the Entra interactive session)
-    if [[ "${vtype}" == "flat-entra" && -n "${az_tunnels}" ]]; then
-        _bw_input "Port Forward User (optional)" \
-            "\nSSH username for the port-forward session.\nflat-entra VMs use Entra ID (AAD) for the\ninteractive session, but port-forward SSH\nneeds a regular key-based identity — which\nmay have a different username format.\ne.g.  user@contoso.com\nLeave blank to use the VM auth setting." \
+    # fwd_user / fwd_identity: for flat-entra the port-forward SSH needs a
+    # different identity than the Entra interactive session; for tiered-bastion
+    # the nested SSH hop uses a LOCAL jumpbox account (e.g. aetadmin).
+    if [[ ( "${vtype}" == "flat-entra" || "${vtype}" == "tiered-bastion" ) && -n "${az_tunnels}" ]]; then
+        _bw_input "Port Forward / Jumpbox User (optional)" \
+            "\nSSH username for the port-forward / nested session.\nflat-entra uses Entra ID (AAD) for the interactive\nsession but key-based SSH for forwards.\ntiered-bastion uses a LOCAL jumpbox account for the\nnested SSH hop (e.g. aetadmin).\ne.g.  aetadmin   or   user@contoso.com\nLeave blank for the type default." \
             "${existing_fwd_user}" || return 1
         fwd_user="${_BW_VAL}"
 

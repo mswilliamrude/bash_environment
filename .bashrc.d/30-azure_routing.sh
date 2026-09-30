@@ -167,6 +167,130 @@ function resolve_target_ip(){
 }
 
 
+# ==============================================================================
+# TUNNEL RESILIENCE HELPERS (logging + keepalive + supervision)
+# Single source of truth so EVERY tunnel/forward path is hardened identically.
+# See TODO.md "Bastion tunnel resilience".
+# ==============================================================================
+
+# Directory for tunnel/forward logs (G2: stop discarding output).
+BASTION_LOG_DIR="${BASTION_LOG_DIR:-${HOME}/.bastion_logs}"
+
+_bastion_logdir() {
+    mkdir -p "${BASTION_LOG_DIR}" 2>/dev/null
+    echo "${BASTION_LOG_DIR}"
+}
+
+# G3: hardened SSH keepalive options — one definition used everywhere.
+# Detect a dead peer in ~45s (Interval=15 x CountMax=3) instead of ~3min,
+# and always disable host-key prompts for these automated tunnels.
+_bastion_ssh_opts() {
+    printf '%s\n' \
+        -o StrictHostKeyChecking=no \
+        -o ServerAliveInterval=15 \
+        -o ServerAliveCountMax=3 \
+        -o ExitOnForwardFailure=yes
+}
+
+# Launch a Bastion tunnel WITH logging (G2). Backgrounds the process.
+# Usage: _bastion_tunnel_up <vm> <bastion_name> <bastion_rg> <vmid> <resource_port> <local_port>
+_bastion_tunnel_up() {
+    local vm="$1" bname="$2" brg="$3" vmid="$4" rport="$5" lport="$6"
+    local logdir; logdir="$(_bastion_logdir)"
+    local log="${logdir}/${vm}_tunnel.log"
+    echo "  [tunnel] logging to ${log}"
+    az network bastion tunnel \
+        --name "${bname}" \
+        --resource-group "${brg}" \
+        --target-resource-id "${vmid}" \
+        --resource-port "${rport}" \
+        --port "${lport}" >> "${log}" 2>&1 &
+}
+
+# Run an SSH -N -f port-forward WITH logging (G2) + hardened keepalive (G3),
+# preferring autossh when present (auto-reconnect). Returns ssh's exit status.
+# Usage: _bastion_ssh_forward <vm> <local_ssh_port> <user@host> [extra ssh args/-L...]
+_bastion_ssh_forward() {
+    local vm="$1"; shift
+    local sshport="$1"; shift
+    local userhost="$1"; shift
+    local logdir; logdir="$(_bastion_logdir)"
+    local log="${logdir}/${vm}_fwd.log"
+    local -a opts; mapfile -t opts < <(_bastion_ssh_opts)
+
+    if command -v autossh >/dev/null 2>&1; then
+        # autossh re-establishes the SSH forward if it drops (purpose-built).
+        AUTOSSH_LOGFILE="${log}" AUTOSSH_GATETIME=0 \
+        autossh -M 0 -p "${sshport}" -N -f "${opts[@]}" -E "${log}" "$@" "${userhost}"
+    else
+        ssh -p "${sshport}" -N -f "${opts[@]}" -E "${log}" "$@" "${userhost}"
+    fi
+}
+
+# ------------------------------------------------------------------------------
+# G1: health-check + auto-restart supervisor.
+# A detached background loop that, every BASTION_WATCH_INTERVAL seconds, checks
+# that every port listed in ~/.bastion_fwd_ports_<vm> is LISTENING. If any is
+# gone, it re-runs `bastion <vm>` (background mode) to rebuild the whole chain.
+# PID tracked in ~/.bastion_watch_pid_<vm> so it is idempotent and stoppable.
+# ------------------------------------------------------------------------------
+BASTION_WATCH_INTERVAL="${BASTION_WATCH_INTERVAL:-15}"
+
+_bastion_ports_listening() {
+    # returns 0 only if ALL given ports are listening
+    local p
+    netstat -an > /tmp/netstat.out 2>/dev/null
+    for p in "$@"; do
+        egrep "(127.0.0.1|0.0.0.0):${p}[^0-9].*LISTEN" /tmp/netstat.out >/dev/null 2>&1 || return 1
+    done
+    return 0
+}
+
+_bastion_supervise_start() {
+    local vm="$1"
+    [[ "${BASTION_SUPERVISE:-1}" == "1" ]] || return 0   # opt-out via BASTION_SUPERVISE=0
+    local pidfile="${HOME}/.bastion_watch_pid_${vm}"
+    local portfile="${HOME}/.bastion_fwd_ports_${vm}"
+    local logdir; logdir="$(_bastion_logdir)"
+    local log="${logdir}/${vm}_watch.log"
+
+    # Already supervising? (pid alive) -> idempotent no-op
+    if [[ -f "$pidfile" ]] && kill -0 "$(<"$pidfile")" 2>/dev/null; then
+        return 0
+    fi
+    [[ -f "$portfile" ]] || return 0   # nothing to watch yet
+
+    (
+        # Detach: ignore HUP so it survives shell exit; low-noise loop.
+        trap '' HUP
+        while :; do
+            sleep "${BASTION_WATCH_INTERVAL}"
+            [[ -f "$portfile" ]] || { echo "$(date '+%F %T') portfile gone; supervisor exiting" >> "$log"; break; }
+            local ports; ports="$(<"$portfile")"
+            [[ -n "$ports" ]] || continue
+            if ! _bastion_ports_listening $ports; then
+                echo "$(date '+%F %T') port down (want: $ports) -> rebuilding ${vm}" >> "$log"
+                # Rebuild the whole chain in background mode. Suppress its output
+                # into the watch log; it re-registers ports + relaunches tunnel+fwd.
+                BASTION_SUPERVISE=0 bastion "${vm}" >> "$log" 2>&1
+            fi
+        done
+    ) &
+    echo $! > "$pidfile"
+    echo "  [supervisor] watching ${vm} every ${BASTION_WATCH_INTERVAL}s (pid $(<"$pidfile"), log ${log})"
+}
+
+_bastion_supervise_stop() {
+    local vm="$1"
+    local pidfile="${HOME}/.bastion_watch_pid_${vm}"
+    if [[ -f "$pidfile" ]]; then
+        local wpid; wpid="$(<"$pidfile")"
+        [[ -n "$wpid" ]] && kill "$wpid" 2>/dev/null
+        rm -f "$pidfile"
+    fi
+}
+
+
 function az_subscription(){
     local verb=${1}; shift
     local noun="${@}"
@@ -253,7 +377,14 @@ function cleanup_tunnels() {
 
     if [[ "${target,,}" == "all" ]]; then
         echo "Cleaning up ALL SSH and Bastion tunnels..."
-        local pids=$(ps -ef | grep -v grep | grep -E "az network bastion tunnel|az ssh vm|plink\.exe.*-L" | awk '{print $2}')
+        # Stop all supervisors first so they don't rebuild what we're tearing down.
+        for pf in "${HOME}"/.bastion_watch_pid_*; do
+            [[ -e "$pf" ]] || continue
+            local wpid; wpid="$(<"$pf")"
+            [[ -n "$wpid" ]] && kill "$wpid" 2>/dev/null
+            rm -f "$pf"
+        done
+        local pids=$(ps -ef | grep -v grep | grep -E "az network bastion tunnel|az ssh vm|autossh|plink\.exe.*-L" | awk '{print $2}')
         if [[ -n "$pids" ]]; then
             echo "$pids" | xargs kill -9 2>/dev/null
         fi
@@ -266,6 +397,9 @@ function cleanup_tunnels() {
         local port="${VM_PORT[$target]}"
         local az_name="${VM_NAME[$target]}"
         echo "Cleaning up tunnels for ${target}..."
+
+        # Stop the supervisor for this vm FIRST (else it rebuilds immediately).
+        _bastion_supervise_stop "${target}"
 
         # Kill az network bastion for this port
         local bpids=$(ps -ef | grep -v grep | grep "az network bastion tunnel" | grep "port ${port}" | awk '{print $2}')
@@ -312,12 +446,15 @@ function bastion(){
         echo "================================================================================"
         echo "                              BASTION MANAGER"
         echo "================================================================================"
-        echo "Usage: bastion <alias> [ssh]"
+        echo "Usage: bastion <alias> [ssh|rdp]"
         echo ""
         echo "  <alias> : Connects to the host (usually backgrounds to set up port forwards)"
         echo "  ssh     : Optional. Bypasses the background tunnel and drops you into a fully"
         echo "            interactive SSH session. (Supports Entra ID / AAD authentication!)"
         echo "            Example: bastion secvdi ssh"
+        echo "  rdp     : Optional (tiered-bastion). Brings up the Bastion tunnel + nested"
+        echo "            forwards, then launches an RDP client to the lab host behind the"
+        echo "            jumpbox. Example: bastion jbox rdp"
         echo ""
         echo "Related Commands:"
         echo "  list_vms         : Shows all configured VMs and their routing settings"
@@ -457,12 +594,7 @@ function bastion(){
                 echo "Creating bastion tunnel on local port ${port}..."
                 echo "${port}" > "${HOME}/.bastion_fwd_ports_${vm}"
 
-                az network bastion tunnel \
-                    --name "${bastion_name}" \
-                    --resource-group "${bastion_rg}" \
-                    --target-resource-id "${VMID}" \
-                    --resource-port 22 \
-                    --port "${port}" > /dev/null 2>&1 &
+                _bastion_tunnel_up "${vm}" "${bastion_name}" "${bastion_rg}" "${VMID}" 22 "${port}"
             fi
 
             # 2. Wait for tunnel to be ready (both modes need this)
@@ -494,12 +626,7 @@ function bastion(){
                 # Background mode: set up port forwards if defined
                 if [[ ${#dynamic_ssh_args[@]} -gt 0 ]]; then
                     echo "Establishing port forwards: ${VM_PROPS[${vm}_az_tunnels]}"
-                    ssh -p "${port}" "${dynamic_ssh_args[@]}" -N -f \
-                        -o StrictHostKeyChecking=no \
-                        -o ExitOnForwardFailure=yes \
-                        -o ServerAliveInterval=60 \
-                        -o ServerAliveCountMax=3 \
-                        "${SSH_TARGET_USER}@localhost" 2>/dev/null
+                    _bastion_ssh_forward "${vm}" "${port}" "${SSH_TARGET_USER}@localhost" "${dynamic_ssh_args[@]}" 2>/dev/null
                     
                     if [[ $? -eq 0 ]]; then
                         echo "Port forwards active."
@@ -533,12 +660,7 @@ function bastion(){
                 else
                     echo "Starting background tunnel on port ${port}..."
                     echo "${port}" > "${HOME}/.bastion_fwd_ports_${vm}"
-                    az network bastion tunnel \
-                        --name "${bastion_name}" \
-                        --resource-group "${bastion_rg}" \
-                        --target-resource-id "${VMID}" \
-                        --resource-port 22 \
-                        --port "${port}" > /dev/null 2>&1 &
+                    _bastion_tunnel_up "${vm}" "${bastion_name}" "${bastion_rg}" "${VMID}" 22 "${port}"
                     
                     # Wait for tunnel
                     local wait_count=0
@@ -567,12 +689,7 @@ function bastion(){
                     [[ -n "$fwd_identity" ]] && identity_args=("-i" "$fwd_identity")
                     
                     echo "Establishing port forwards: ${VM_PROPS[${vm}_az_tunnels]}"
-                    ssh -p "${port}" "${identity_args[@]}" "${dynamic_ssh_args[@]}" -N -f \
-                        -o StrictHostKeyChecking=no \
-                        -o ExitOnForwardFailure=yes \
-                        -o ServerAliveInterval=60 \
-                        -o ServerAliveCountMax=3 \
-                        "${fwd_user}@localhost" 2>/dev/null
+                    _bastion_ssh_forward "${vm}" "${port}" "${fwd_user}@localhost" "${identity_args[@]}" "${dynamic_ssh_args[@]}" 2>/dev/null
                     
                     if [[ $? -eq 0 ]]; then
                         echo "Port forwards active."
@@ -602,12 +719,7 @@ function bastion(){
                     echo "Mode: Background Tunnel. Establishing bastion tunnel on local port ${port}..."
                     echo "${port}" > "${HOME}/.bastion_fwd_ports_${vm}"
 
-                    az network bastion tunnel \
-                        --name "${bastion_name}" \
-                        --resource-group "${bastion_rg}" \
-                        --target-resource-id "${VMID}" \
-                        --resource-port 22 \
-                        --port "${port}" > /dev/null 2>&1 &
+                    _bastion_tunnel_up "${vm}" "${bastion_name}" "${bastion_rg}" "${VMID}" 22 "${port}"
                 fi
                 
                 # Wait for tunnel to be ready before setting up port forwards
@@ -640,18 +752,143 @@ function bastion(){
                     [[ -n "$fwd_identity" ]] && identity_args=("-i" "$fwd_identity")
                     
                     echo "Establishing port forwards: ${VM_PROPS[${vm}_az_tunnels]}"
-                    ssh -p "${port}" "${identity_args[@]}" "${dynamic_ssh_args[@]}" -N -f \
-                        -o StrictHostKeyChecking=no \
-                        -o ExitOnForwardFailure=yes \
-                        -o ServerAliveInterval=60 \
-                        -o ServerAliveCountMax=3 \
-                        "${fwd_user}@localhost" 2>/dev/null
+                    _bastion_ssh_forward "${vm}" "${port}" "${fwd_user}@localhost" "${identity_args[@]}" "${dynamic_ssh_args[@]}" 2>/dev/null
                     
                     if [[ $? -eq 0 ]]; then
                         echo "Port forwards active."
                     else
                         echo "WARNING: Port forward SSH failed. Tunnel is up but forwards not established."
                     fi
+                fi
+            fi
+            ;;
+
+        "tiered-bastion")
+            # ------------------------------------------------------------------
+            # ENGINE: Tiered-Bastion Topology (Bastion tunnel -> jumpbox -> nested)
+            # Local -> az network bastion tunnel (jbox:22 -> localhost:PORT)
+            #       -> ssh <fwd_user>@localhost -L <nested C1 forwards>
+            #
+            # For private-only jumpboxes that have NO public IP and are reachable
+            # only via Azure Bastion (native-client tunneling). The interactive
+            # SSH hop uses a LOCAL account on the jumpbox (e.g. aetadmin), not
+            # Entra/AAD — Entra login only applies to the Bastion RDP/SSH front
+            # door, not the nested SSH. The nested -L forwards (from
+            # <vm>_az_tunnels) reach lab hosts behind the jumpbox (e.g. C1 RDP).
+            #
+            # Requires (one-time, per RG): the caller must hold the
+            # "Virtual Machine User Login" role on the jumpbox's resource group.
+            # ------------------------------------------------------------------
+            local VMID
+            VMID=$(get_vmid "${rg}" "${az_name}")
+            if [[ -z "$VMID" ]]; then
+                echo "Error: could not resolve VM resource id for ${az_name} in ${rg}." >&2
+                echo "       Check the name/RG in ~/.bastion_topology.conf." >&2
+                return 1
+            fi
+
+            # Bring up the Bastion tunnel (jbox:22 -> localhost:${port}) if needed.
+            local tunnel_was_running="false"
+            netstat -an > /tmp/netstat.out 2>/dev/null
+            if egrep "(127.0.0.1|0.0.0.0):${port}.*LISTEN" /tmp/netstat.out >/dev/null; then
+                echo "Bastion tunnel already running on port ${port}."
+                tunnel_was_running="true"
+            else
+                echo "Establishing Bastion tunnel via ${bastion_name} (jbox:22 -> localhost:${port})..."
+                echo "${port}" > "${HOME}/.bastion_fwd_ports_${vm}"
+                _bastion_tunnel_up "${vm}" "${bastion_name}" "${bastion_rg}" "${VMID}" 22 "${port}"
+            fi
+
+            # Wait for the tunnel to be listening.
+            if [[ "$tunnel_was_running" != "true" ]]; then
+                echo "Waiting for Bastion tunnel on port ${port}..."
+                local wait_count=0 max_wait=30
+                while (( wait_count < max_wait )); do
+                    netstat -an > /tmp/netstat.out 2>/dev/null
+                    egrep "(127.0.0.1|0.0.0.0):${port}.*LISTEN" /tmp/netstat.out >/dev/null && break
+                    sleep 1; (( wait_count++ ))
+                done
+                if (( wait_count >= max_wait )); then
+                    echo "ERROR: Bastion tunnel failed to start within ${max_wait}s." >&2
+                    echo "       Confirm you hold 'Virtual Machine User Login' on ${rg}" >&2
+                    echo "       and that '${bastion_name}' has native tunneling enabled." >&2
+                    return 1
+                fi
+                echo "Tunnel ready."
+            fi
+
+            # The nested SSH hop uses a LOCAL jumpbox account. Default 'aetadmin'
+            # unless overridden per-VM via <vm>_fwd_user; an optional identity/key
+            # can be supplied via <vm>_fwd_identity.
+            local fwd_user="${VM_PROPS[${vm}_fwd_user]:-aetadmin}"
+            local fwd_identity="${VM_PROPS[${vm}_fwd_identity]:-}"
+            local identity_args=()
+            [[ -n "$fwd_identity" ]] && identity_args=("-i" "$fwd_identity")
+
+            if [[ "$BASTION_MODE" == "ssh" ]]; then
+                echo "Mode: SSH Interactive. Connecting to ${az_name} as ${fwd_user} (nested forwards active)..."
+                ssh -p "${port}" "${identity_args[@]}" "${dynamic_ssh_args[@]}" \
+                    -o StrictHostKeyChecking=no \
+                    -o ServerAliveInterval=15 \
+                    -o ServerAliveCountMax=3 \
+                    "${fwd_user}@127.0.0.1"
+            elif [[ "$BASTION_MODE" == "rdp" ]]; then
+                # Bring the nested -L forwards up in the BACKGROUND, then launch a
+                # local RDP client at the localhost port that maps to :3389 on a
+                # lab host behind the jumpbox (e.g. the C1 devkit).
+                if [[ ${#dynamic_ssh_args[@]} -eq 0 ]]; then
+                    echo "ERROR: rdp mode needs a nested forward. Define ${vm}_az_tunnels" >&2
+                    echo "       with an RDP mapping, e.g. 13389:172.27.1.19:3389." >&2
+                    return 1
+                fi
+
+                echo "Establishing nested port forwards via ${fwd_user}@jumpbox..."
+                _bastion_ssh_forward "${vm}" "${port}" "${fwd_user}@127.0.0.1" "${identity_args[@]}" "${dynamic_ssh_args[@]}" 2>/dev/null
+                if [[ $? -ne 0 ]]; then
+                    echo "ERROR: nested port-forward SSH failed; cannot launch RDP." >&2
+                    return 1
+                fi
+
+                # Determine the local RDP port. Prefer explicit ${vm}_rdp_port,
+                # else auto-detect the local port of the tunnel whose remote port
+                # is 3389 (from ${vm}_az_tunnels: "local:remote_ip:remote_port").
+                local rdp_local_port="${VM_PROPS[${vm}_rdp_port]:-}"
+                if [[ -z "$rdp_local_port" ]]; then
+                    for tunnel in ${VM_PROPS[${vm}_az_tunnels]}; do
+                        if [[ "${tunnel##*:}" == "3389" ]]; then
+                            rdp_local_port="${tunnel%%:*}"
+                            break
+                        fi
+                    done
+                fi
+
+                if [[ -z "$rdp_local_port" ]]; then
+                    echo "ERROR: could not determine an RDP port. Set ${vm}_rdp_port or add" >&2
+                    echo "       a *:...:3389 mapping to ${vm}_az_tunnels." >&2
+                    return 1
+                fi
+
+                echo "Launching RDP to 127.0.0.1:${rdp_local_port} (nested to lab host)..."
+                if command -v mstsc.exe >/dev/null 2>&1; then
+                    mstsc.exe "/v:127.0.0.1:${rdp_local_port}" >/dev/null 2>&1 &
+                elif command -v mstsc >/dev/null 2>&1; then
+                    mstsc "/v:127.0.0.1:${rdp_local_port}" >/dev/null 2>&1 &
+                elif command -v xfreerdp >/dev/null 2>&1; then
+                    xfreerdp "/v:127.0.0.1:${rdp_local_port}" >/dev/null 2>&1 &
+                else
+                    echo "No RDP client found (mstsc/xfreerdp). Connect manually to 127.0.0.1:${rdp_local_port}." >&2
+                fi
+            else
+                echo "Mode: Background. Establishing nested port forwards via ${fwd_user}@jumpbox..."
+                if [[ ${#dynamic_ssh_args[@]} -gt 0 ]]; then
+                    _bastion_ssh_forward "${vm}" "${port}" "${fwd_user}@127.0.0.1" "${identity_args[@]}" "${dynamic_ssh_args[@]}" 2>/dev/null
+                    if [[ $? -eq 0 ]]; then
+                        echo "Nested port forwards active: ${VM_PROPS[${vm}_az_tunnels]}"
+                    else
+                        echo "WARNING: nested port-forward SSH failed. Bastion tunnel is up, forwards are not." >&2
+                    fi
+                else
+                    echo "Bastion tunnel up on localhost:${port}. No nested forwards defined."
                 fi
             fi
             ;;
@@ -754,10 +991,19 @@ function bastion(){
             
         *)
             echo "Error: Unknown topology type '${vtype}' for VM '${vm}'."
-            echo "Must be 'flat', 'flat-entra', or 'tiered'."
+            echo "Must be 'flat', 'flat-entra', 'tiered', or 'tiered-bastion'."
             return 1
             ;;
     esac
+
+    # G1: start the auto-restart supervisor for BACKGROUND connections only.
+    # Interactive modes (ssh/rdp) are foreground/user-driven and shouldn't be
+    # auto-rebuilt. Opt out entirely with BASTION_SUPERVISE=0.
+    if [[ "$BASTION_MODE" != "ssh" && "$BASTION_MODE" != "rdp" ]]; then
+        if [[ -f "${HOME}/.bastion_fwd_ports_${vm}" ]]; then
+            _bastion_supervise_start "${vm}"
+        fi
+    fi
 }
 
 function sshbastion(){
