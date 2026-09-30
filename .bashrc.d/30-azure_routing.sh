@@ -192,19 +192,38 @@ _bastion_ssh_opts() {
         -o ExitOnForwardFailure=yes
 }
 
-# Launch a Bastion tunnel WITH logging (G2). Backgrounds the process.
+# Run a command in the background SILENTLY — no "[N] <pid>" job-control line and
+# no later "Done/Exit" notification. Echoes the child PID on stdout. Monitor
+# mode is saved and restored so the interactive shell's job control is never
+# left disabled. Single source of truth for the set+m/disown dance.
+#
+# The command's stdout/stderr are redirected to the file given as $1 (append).
+# Usage: pid=$(_bastion_bg <logfile> <command> [args...])
+_bastion_bg() {
+    local _logfile="$1"; shift
+    local _had_monitor=0
+    case "$-" in *m*) _had_monitor=1;; esac
+    set +m 2>/dev/null
+    "$@" >> "${_logfile}" 2>&1 &
+    local _pid=$!
+    disown "$_pid" 2>/dev/null
+    (( _had_monitor )) && set -m 2>/dev/null
+    printf '%s\n' "$_pid"
+}
+
+# Launch a Bastion tunnel WITH logging (G2). Backgrounds the process silently.
 # Usage: _bastion_tunnel_up <vm> <bastion_name> <bastion_rg> <vmid> <resource_port> <local_port>
 _bastion_tunnel_up() {
     local vm="$1" bname="$2" brg="$3" vmid="$4" rport="$5" lport="$6"
     local logdir; logdir="$(_bastion_logdir)"
     local log="${logdir}/${vm}_tunnel.log"
     echo "  [tunnel] logging to ${log}"
-    az network bastion tunnel \
+    _bastion_bg "${log}" az network bastion tunnel \
         --name "${bname}" \
         --resource-group "${brg}" \
         --target-resource-id "${vmid}" \
         --resource-port "${rport}" \
-        --port "${lport}" >> "${log}" 2>&1 &
+        --port "${lport}" >/dev/null
 }
 
 # Run an SSH -N -f port-forward WITH logging (G2) + hardened keepalive (G3),
@@ -260,7 +279,18 @@ _bastion_supervise_start() {
     fi
     [[ -f "$portfile" ]] || return 0   # nothing to watch yet
 
+    # Launch the watchdog fully detached and WITHOUT job-control noise.
+    # 'set +m' suppresses the "[1] <pid>" announcement; disown removes it from
+    # the job table so no "Done"/"Exit" line prints later. Monitor mode is saved
+    # and restored so we never leave the interactive shell's job control off.
+    local _wpid _had_monitor=0
+    case "$-" in *m*) _had_monitor=1;; esac
+    set +m 2>/dev/null
     (
+        # Keep job control OFF inside the watchdog too, so the recursive
+        # `bastion` rebuild (which briefly restores -m in the parent) can never
+        # leak a "[N] <pid>" line into this loop.
+        set +m 2>/dev/null
         # Detach: ignore HUP so it survives shell exit; low-noise loop.
         trap '' HUP
         while :; do
@@ -275,9 +305,13 @@ _bastion_supervise_start() {
                 BASTION_SUPERVISE=0 bastion "${vm}" >> "$log" 2>&1
             fi
         done
-    ) &
-    echo $! > "$pidfile"
-    echo "  [supervisor] watching ${vm} every ${BASTION_WATCH_INTERVAL}s (pid $(<"$pidfile"), log ${log})"
+    ) >/dev/null 2>&1 &
+    _wpid=$!
+    disown "$_wpid" 2>/dev/null
+    (( _had_monitor )) && set -m 2>/dev/null
+    echo "$_wpid" > "$pidfile"
+    # Keep the console clean: record the supervisor start in the log, not stdout.
+    echo "$(date '+%F %T') supervisor started (pid ${_wpid}, interval ${BASTION_WATCH_INTERVAL}s)" >> "$log"
 }
 
 _bastion_supervise_stop() {
